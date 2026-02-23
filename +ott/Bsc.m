@@ -1015,6 +1015,7 @@ classdef Bsc
       p.addParameter('showVisualisation', nargout == 0);
       p.addParameter('combine', []);
       p.addParameter('cidx', []);   % Used with savedata
+      p.addParameter('log_scale', false)
       p.parse(varargin{:});
 
       if iscell(p.Results.range)
@@ -1103,6 +1104,161 @@ classdef Bsc
         if ~isempty(p.Results.mask)
           imout(p.Results.mask(xyz.')) = NaN;
         end
+
+        if p.Results.log_scale
+            imout = imout + 1.0e-16;
+            imout = log10(imout);
+        end
+        
+        imagesc(xrange, yrange, imout, 'AlphaData', ~isnan(imout));
+        xlabel(alabels{1});
+        ylabel(alabels{2});
+        axis image;
+      elseif p.Results.showVisualisation
+        warning('OTT:Bsc:visualise:too_many_beams', ...
+          ['Visualisation not shown for multiple beams\n', ...
+           '> Consider combining beams coherently or incoherently']);
+      end
+      
+      % Handle outputs
+      if nargout == 1
+        varargout{1} = imout;
+      elseif nargout == 2
+        varargout{1} = imout;
+        varargout{2} = data;
+      end
+    end
+
+    function varargout = visualise_log(beam, varargin)
+      % Create a visualisation of the beam
+      %
+      % Usage
+      %   visualise(...) displays an image of the beam in the current
+      %   figure window.
+      %
+      %   im = visualise(...) returns a image of the beam.
+      %   If the beam object contains multiple beams, returns images
+      %   for each beam.
+      %
+      % Optional named arguments
+      %   - 'size'    [ x, y ]    Width and height of image
+      %   - 'field'   type        Type of field to calculate
+      %   - 'axis'    ax          Axis to visualise ('x', 'y', 'z') or
+      %     a cell array with 2 or 3 unit vectors for x, y, [z].
+      %   - 'offset'  offset      Plane offset along axis (default: 0.0)
+      %   - 'range'   [ x, y ]    Range of points to visualise.
+      %     Can either be a cell array { x, y }, two scalars for
+      %     range [-x, x], [-y, y] or 4 scalars [ x0, x1, y0, y1 ].
+      %   - 'mask'    func(xyz)   Mask function for regions to keep in vis
+      %   - 'combine' (enum)      If multiple beams should be treated as
+      %     'coherent' or 'incoherent' beams and their outputs added.
+      %     incoherent may only makes sense if the field is an intensity.
+      %     Default: [].
+
+      p = inputParser;
+      p.addParameter('field', 'irradiance');
+      p.addParameter('size', [ 80, 80 ]);
+      p.addParameter('axis', 'z');
+      p.addParameter('offset', 0.0);
+      p.addParameter('range', ...
+          [1,1]*ott.utils.nmax2ka(beam.Nmax)/abs(beam.k_medium));
+      p.addParameter('saveData', nargout == 2);
+      p.addParameter('data', []);
+      p.addParameter('mask', []);
+      p.addParameter('showVisualisation', nargout == 0);
+      p.addParameter('combine', []);
+      p.addParameter('cidx', []);   % Used with savedata
+      p.parse(varargin{:});
+
+      if iscell(p.Results.range)
+        xrange = p.Results.range{1};
+        yrange = p.Results.range{2};
+        sz = [length(yrange), length(xrange)];
+      elseif length(p.Results.range) == 2
+        xrange = linspace(-1, 1, p.Results.size(1))*p.Results.range(1);
+        yrange = linspace(-1, 1, p.Results.size(2))*p.Results.range(2);
+        sz = p.Results.size;
+      elseif length(p.Results.range) == 4
+        xrange = linspace(p.Results.range(1), p.Results.range(2), p.Results.size(1));
+        yrange = linspace(p.Results.range(3), p.Results.range(4), p.Results.size(2));
+        sz = p.Results.size;
+      else
+        error('ott:Bsc:visualise:range_error', 'Incorrect number of range arguments');
+      end
+      [xx, yy, zz] = meshgrid(xrange, yrange, p.Results.offset);
+
+      % Generate the xyz grid for the used requested plane
+      if ischar(p.Results.axis)
+        switch p.Results.axis
+          case 'x'
+            xyz = [zz(:), yy(:), xx(:)];
+            alabels = {'Z', 'Y'};
+          case 'y'
+            xyz = [yy(:), zz(:), xx(:)];
+            alabels = {'Z', 'X'};
+          case 'z'
+            xyz = [xx(:), yy(:), zz(:)];
+            alabels = {'X', 'Y'};
+          otherwise
+            error('Unknown axis name specified');
+        end
+      elseif iscell(p.Results.axis)
+        dir1 = p.Results.axis{1}(:);
+        dir2 = p.Results.axis{2}(:);
+        if numel(p.Results.axis) == 3
+          dir3 = p.Results.axis{3}(:);
+        else
+          dir3 = cross(dir1(:), dir2(:));
+        end
+        
+        alabels = {'Direction 1', 'Direction 2'};
+        
+        xyz = dir1.*xx(:).' + dir2.*yy(:).' + dir3.*zz(:).';
+        xyz = xyz.';
+      else
+        error('axis must be character or cell array');
+      end
+      
+      if strcmpi(p.Results.combine, 'coherent')
+        % Reduce the amount of work done in emFieldXyz
+        beam = sum(beam);
+      end
+      
+      imout = zeros(sz(2), sz(1), beam.Nbeams);
+      
+      % If save data is requested, this gets reused for multiple beams
+      data = p.Results.data;
+      
+      for ii = 1:beam.Nbeams
+
+        % Calculate the electric field
+        [E, ~, data] = beam.beam(ii).emFieldXyz(xyz.', ...
+            'saveData', p.Results.saveData, 'data', data, ...
+            'calcE', true', 'calcH', false, 'cidx', p.Results.cidx);
+
+        % Generate the requested field
+        dataout = beam.GetVisualisationData(p.Results.field, ...
+          xyz, [], E.', []);
+        disp(max(abs(E.')))
+
+        % Reshape the output
+        imout(:, :, ii) = reshape(dataout, sz(2), sz(1));
+        
+      end
+      
+      if strcmpi(p.Results.combine, 'incoherent')
+        imout = sum(imout, 3);
+      end
+
+      % Display the visualisation
+      if p.Results.showVisualisation && ismatrix(imout)
+        
+        % Apply the mask
+        if ~isempty(p.Results.mask)
+          imout(p.Results.mask(xyz.')) = NaN;
+        end
+        imout = imout + 1.0e-16;
+        imout = log10(imout);
         
         imagesc(xrange, yrange, imout, 'AlphaData', ~isnan(imout));
         xlabel(alabels{1});
